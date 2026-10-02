@@ -15,8 +15,10 @@ RUN groupadd -g 1000 container 2>/dev/null || true && \
 # Redirect /config (binhex hard-coded path) to Pelican's /home/container.
 RUN rm -rf /config && mkdir -p /home/container && ln -sf /home/container /config
 
-# Allow uid 1000 to manage /home/nobody (needed by the symlink helper).
-RUN chown 1000:1000 /home && chmod 755 /home
+# Replace /home/nobody with a symlink to /config/home so the runtime symlink
+# helper does not try to move the (read-only) image directory.
+RUN rm -rf /home/nobody && ln -s /config/home /home/nobody && \
+    chown 1000:1000 /home && chmod 755 /home
 
 # Pre-create /opt/fs25 directories and make everything writable by uid 1000.
 RUN mkdir -p /opt/fs25/config /opt/fs25/game /opt/fs25/dlc /opt/fs25/installer && \
