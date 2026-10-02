@@ -45,7 +45,7 @@ RUN chmod +x /usr/bin/init.sh
 # Runtime helper scripts reference /home/nobody/.build/fs25 for templates. Because
 # Pelican runs the container with a read-only root filesystem, point them to the
 # writable /tmp/fs25-build copy created by init.sh at runtime.
-RUN sed -i 's|/home/nobody/.build/fs25|/tmp/fs25-build|g' /usr/local/bin/copy_server_config.sh
+RUN sed -i 's|/home/nobody/.build/fs25|/home/container/.fs25-build|g' /usr/local/bin/copy_server_config.sh
 
 # Make sure the runtime user can write supervisord.log and state files.
 RUN touch /config/supervisord.log && chown -R 1000:1000 /config && chmod 666 /config/supervisord.log 2>/dev/null || true
