@@ -27,14 +27,13 @@ RUN mkdir -p /opt/fs25/config /opt/fs25/game /opt/fs25/dlc /opt/fs25/installer &
 
 # Supervisord must not try to switch to another user when running as uid 1000.
 # Also remove the top-level [supervisord] user=root directive and move the
-# unix socket to /tmp so uid 1000 can create it.
+# unix socket to /home/container (the only writable volume Pelican mounts).
 RUN sed -i '/^user = nobody$/d' /etc/supervisor/conf.d/*.conf && \
     sed -i '/^user = root$/d' /etc/supervisord.conf && \
-    sed -i 's|^file=/run/supervisor.sock|file=/tmp/supervisor.sock|' /etc/supervisord.conf && \
-    sed -i 's|unix:///run/supervisor.sock|unix:///tmp/supervisor.sock|' /etc/supervisord.conf && \
-    mkdir -p /tmp && \
-    chown -R 1000:1000 /etc/supervisor /etc/supervisord.conf /var/log/supervisor /tmp && \
-    chmod -R 755 /etc/supervisor /etc/supervisord.conf /tmp
+    sed -i 's|^file=/run/supervisor.sock|file=/home/container/.supervisor.sock|' /etc/supervisord.conf && \
+    sed -i 's|unix:///run/supervisor.sock|unix:///home/container/.supervisor.sock|' /etc/supervisord.conf && \
+    chown -R 1000:1000 /etc/supervisor /etc/supervisord.conf /var/log/supervisor && \
+    chmod -R 755 /etc/supervisor /etc/supervisord.conf
 
 # Replace init.sh with a patched version that skips root-only commands.
 COPY init.sh /usr/bin/init.sh
