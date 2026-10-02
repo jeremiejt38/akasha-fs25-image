@@ -183,7 +183,7 @@ fi
 
 # Copy writable templates for runtime config edits (container fs is read-only under Pelican)
 mkdir -p /home/container/.fs25-build
-cp /home/nobody/.build/fs25/* /home/container/.fs25-build/
+cp /usr/local/share/fs25-templates/* /home/container/.fs25-build/
 
 # Webserver
 

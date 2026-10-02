@@ -15,19 +15,15 @@ RUN groupadd -g 1000 container 2>/dev/null || true && \
 # Redirect /config (binhex hard-coded path) to Pelican's /home/container.
 RUN rm -rf /config && mkdir -p /home/container && ln -sf /home/container /config
 
-# Replace /home/nobody with a symlink to /config/home so the runtime symlink
-# helper does not try to move the (read-only) image directory.
-RUN rm -rf /home/nobody && ln -s /config/home /home/nobody && \
+# Keep the FS25 XML templates somewhere accessible before replacing /home/nobody.
+RUN cp -a /home/nobody/.build/fs25 /usr/local/share/fs25-templates && \
+    rm -rf /home/nobody && ln -s /config/home /home/nobody && \
     chown 1000:1000 /home && chmod 755 /home
 
 # Pre-create /opt/fs25 directories and make everything writable by uid 1000.
 RUN mkdir -p /opt/fs25/config /opt/fs25/game /opt/fs25/dlc /opt/fs25/installer && \
-    chown -R 1000:1000 /opt/fs25 /home/container /home/nobody /tmp && \
-    chmod -R 755 /opt/fs25 /home/container /home/nobody
-
-# The init scripts edit templates under /home/nobody/.build/fs25, so ensure
-# the runtime user can write there.
-RUN chown -R 1000:1000 /home/nobody/.build/fs25 && chmod -R 755 /home/nobody/.build/fs25
+    chown -R 1000:1000 /opt/fs25 /home/container /tmp && \
+    chmod -R 755 /opt/fs25 /home/container
 
 # Supervisord must not try to switch to another user when running as uid 1000.
 # Also remove the top-level [supervisord] user=root directive and move the
