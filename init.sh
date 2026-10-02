@@ -301,7 +301,8 @@ if [[ "${ENABLE_STARTUP_SCRIPTS}" == "yes" ]]; then
 fi
 
 # call symlink function from utils.sh
-symlink --src-path '/config/home' --dst-path '/home/nobody' --link-type 'softlink'
+# Use the resolved path because /config is itself a symlink to /home/container.
+symlink --src-path '/home/container/home' --dst-path '/home/nobody' --link-type 'softlink'
 
 
 # set permissions to allow rw for all users (used when appending util output to supervisor log)
