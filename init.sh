@@ -251,12 +251,12 @@ export APPLICATION="fs25server"
 
 
 # get previous puid/pgid (if first run then will be empty string)
-previous_puid=$(cat "/tmp/puid" 2>/dev/null || true)
-previous_pgid=$(cat "/tmp/pgid" 2>/dev/null || true)
+previous_puid=$(cat "/home/container/.puid" 2>/dev/null || true)
+previous_pgid=$(cat "/home/container/.pgid" 2>/dev/null || true)
 
 # if first run (no puid or pgid files in /tmp) or the PUID or PGID env vars are different
 # from the previous run then re-apply chown with current PUID and PGID values.
-if [[ ! -f "/tmp/puid" || ! -f "/tmp/pgid" || "${previous_puid}" != "${PUID}" || "${previous_pgid}" != "${PGID}" ]]; then
+if [[ ! -f "/home/container/.puid" || ! -f "/home/container/.pgid" || "${previous_puid}" != "${PUID}" || "${previous_pgid}" != "${PGID}" ]]; then
 
 	# set permissions inside container - Do NOT double quote variable for install_paths otherwise this will wrap space separated paths as a single string
 	: # chown /home/nobody skipped
@@ -264,8 +264,8 @@ if [[ ! -f "/tmp/puid" || ! -f "/tmp/pgid" || "${previous_puid}" != "${PUID}" ||
 fi
 
 # write out current PUID and PGID to files in /root (used to compare on next run)
-echo "${PUID}" > /tmp/puid
-echo "${PGID}" > /tmp/pgid
+echo "${PUID}" > /home/container/.puid
+echo "${PGID}" > /home/container/.pgid
 
 
 
