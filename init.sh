@@ -181,6 +181,10 @@ fi
 
 
 
+# Copy writable templates for runtime config edits (container fs is read-only under Pelican)
+mkdir -p /home/container/.fs25-build
+cp /home/nobody/.build/fs25/* /home/container/.fs25-build/
+
 # Webserver
 
 if [ -n "$WEB_USERNAME" ]; then
