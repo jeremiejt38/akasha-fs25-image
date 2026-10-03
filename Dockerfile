@@ -44,6 +44,9 @@ RUN chmod +x /usr/bin/init.sh
 # writable /tmp/fs25-build copy created by init.sh at runtime.
 RUN sed -i 's|/home/nobody/.build/fs25|/home/container/.fs25-build|g' /usr/local/bin/copy_server_config.sh
 
+# Pelican converts boolean environment variables to 1/0, so accept "1" as true.
+RUN sed -i 's|\[\[ \$AUTOSTART_SERVER = "true" \]\]|[[ $AUTOSTART_SERVER = "true" ]] \|\| [[ $AUTOSTART_SERVER = "1" ]]|g' /usr/local/bin/autostart_fs25.sh
+
 # Make sure the runtime user can write supervisord.log and state files.
 RUN touch /config/supervisord.log && chown -R 1000:1000 /config && chmod 666 /config/supervisord.log 2>/dev/null || true
 
