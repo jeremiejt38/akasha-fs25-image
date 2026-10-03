@@ -20,10 +20,13 @@ RUN cp -a /home/nobody/.build/fs25 /usr/local/share/fs25-templates && \
     rm -rf /home/nobody && ln -s /config/home /home/nobody && \
     chown 1000:1000 /home && chmod 755 /home
 
-# Pre-create /opt/fs25 directories and make everything writable by uid 1000.
-RUN mkdir -p /opt/fs25/config /opt/fs25/game /opt/fs25/dlc /opt/fs25/installer && \
-    chown -R 1000:1000 /opt/fs25 /home/container /tmp && \
-    chmod -R 755 /opt/fs25 /home/container
+# Replace the read-only /opt/fs25 with a symlink into /config (which itself
+# points to Pelican's writable /home/container volume).
+RUN rm -rf /opt/fs25 /config/opt/fs25 && \
+    mkdir -p /config/opt/fs25 && \
+    ln -s /config/opt/fs25 /opt/fs25 && \
+    chown -R 1000:1000 /config /opt/fs25 && \
+    chmod -R 755 /config
 
 # Supervisord must not try to switch to another user when running as uid 1000.
 # Also remove the top-level [supervisord] user=root directive and move the
