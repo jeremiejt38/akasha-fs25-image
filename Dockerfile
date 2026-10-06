@@ -51,6 +51,10 @@ RUN pacman -Sy --noconfirm \
 # Add headless installer and activation helpers.
 COPY install_fs25.sh /usr/local/bin/install_fs25.sh
 COPY activate_fs25.sh /usr/local/bin/activate_fs25.sh
+# Patched upstream start_game.mjs: read the SessionID from the login POST
+# response (the server does not Set-Cookie on the initial GET) and fall back
+# to each select's first option when no option is marked selected.
+COPY start_game.mjs /usr/local/bin/start_game.mjs
 RUN chmod +x /usr/local/bin/install_fs25.sh /usr/local/bin/activate_fs25.sh
 
 # Replace init.sh with a patched version that skips root-only commands.

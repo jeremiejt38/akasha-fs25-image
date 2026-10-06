@@ -28,6 +28,9 @@ export WINEPREFIX
 export WINEARCH=win64
 export WINEDEBUG=-all
 export WINEDLLOVERRIDES=mscoree=d
+# Match the upstream Wine profile (wine_init.sh exports USER=nobody; the
+# persistent config symlink lives under users/nobody).
+export USER=nobody
 
 log() {
     echo "[$(date -Iseconds)] $1" >> "$LOG"
@@ -65,8 +68,30 @@ done
 if [ ! -f "${WINEPREFIX}/system.reg" ]; then
     log "Wine prefix missing, creating it"
     . /usr/local/bin/wine_init.sh
-    . /usr/local/bin/wine_symlinks.sh
 fi
+
+# The persistent config symlink must exist BEFORE any Wine process runs, or
+# Wine creates a real My Games/FarmingSimulator2025 directory in the ephemeral
+# prefix and wine_symlinks.sh then refuses to replace it.
+PROFILE_LINK="${WINEPREFIX}/drive_c/users/nobody/Documents/My Games/FarmingSimulator2025"
+CONFIG_DIR="/opt/fs25/config/FarmingSimulator2025"
+for _ in $(seq 1 120); do
+    [ -L "$PROFILE_LINK" ] && break
+    # A real directory blocks the symlink: if it only holds files that belong
+    # in the persistent config dir, migrate them and remove it.
+    if [ -d "$PROFILE_LINK" ] && [ ! -L "$PROFILE_LINK" ]; then
+        mkdir -p "$CONFIG_DIR"
+        cp -an "$PROFILE_LINK/." "$CONFIG_DIR/" 2>/dev/null || true
+        rm -rf "$PROFILE_LINK"
+    fi
+    USER=nobody HOME=/home/container /usr/local/bin/wine_symlinks.sh >/dev/null 2>&1 || true
+    sleep 2
+done
+if [ ! -L "$PROFILE_LINK" ]; then
+    log "ERROR: could not establish persistent config symlink"
+    exit 1
+fi
+log "Persistent config symlink in place"
 
 # Extract the official *_ESD.img image if that is what the customer uploaded.
 IMG=$(find "$INSTALL_DIR" -maxdepth 1 -iname '*.img' | head -1)
@@ -111,5 +136,22 @@ else
     log "ERROR: installer finished but $GAME_EXE is missing"
     exit 1
 fi
+
+# The autostart flow already ran at boot and gave up because the game was not
+# installed yet. Now that it is, bring up the dedicated server web admin (and
+# the game itself for AUTOSTART_SERVER=true) without requiring a restart.
+case "${AUTOSTART_SERVER:-}" in
+    true|1|web_only)
+        if ! pgrep -f 'dedicatedServer\.exe' >/dev/null 2>&1; then
+            log "Starting dedicated server web admin"
+            nohup /usr/local/bin/start_fs25.sh >>"$LOG" 2>&1 &
+        fi
+        if [[ "${AUTOSTART_SERVER}" == "true" || "${AUTOSTART_SERVER}" == "1" ]]; then
+            log "AUTOSTART_SERVER=${AUTOSTART_SERVER}: requesting game start"
+            sleep 45
+            nohup node /usr/local/bin/start_game.mjs >>"$LOG" 2>&1 &
+        fi
+        ;;
+esac
 
 exit 0
