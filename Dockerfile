@@ -38,6 +38,25 @@ RUN sed -i '/^user = nobody$/d' /etc/supervisor/conf.d/*.conf && \
     chown -R 1000:1000 /etc/supervisor /etc/supervisord.conf /var/log/supervisor && \
     chmod -R 755 /etc/supervisor /etc/supervisord.conf
 
+# Install automation tools for headless setup via X/Wine, plus the Vulkan/D3D12
+# stack. The dedicated server runs on the engine's null render device, but the
+# vkd3d + lavapipe packages keep DXGI/GPU enumeration from hard-failing.
+# libgcc/libstdc++ conflict with the base image gcc-libs files, hence --overwrite.
+RUN pacman -Sy --noconfirm \
+        --overwrite '/usr/lib/libgcc_s.so.1,/usr/lib/libstdc++.so*' \
+        xdotool xorg-xwininfo xorriso \
+        vkd3d lib32-vkd3d vulkan-swrast vulkan-icd-loader lib32-vulkan-icd-loader && \
+    rm -rf /var/cache/pacman/pkg/*
+
+# Add headless installer and activation helpers.
+COPY install_fs25.sh /usr/local/bin/install_fs25.sh
+COPY activate_fs25.sh /usr/local/bin/activate_fs25.sh
+# Patched upstream start_game.mjs: read the SessionID from the login POST
+# response (the server does not Set-Cookie on the initial GET) and fall back
+# to each select's first option when no option is marked selected.
+COPY start_game.mjs /usr/local/bin/start_game.mjs
+RUN chmod +x /usr/local/bin/install_fs25.sh /usr/local/bin/activate_fs25.sh
+
 # Replace init.sh with a patched version that skips root-only commands.
 COPY init.sh /usr/bin/init.sh
 RUN chmod +x /usr/bin/init.sh
