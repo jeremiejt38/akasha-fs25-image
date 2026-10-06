@@ -6,6 +6,10 @@ set -e
 # redirect new file descriptors and then tee stdout & stderr to supervisor log and console (captures output from this script)
 exec 3>&1 4>&2 &> >(tee -a /config/supervisord.log)
 
+# The system Wine (10.x staging, shipped by the upstream image) is used as-is:
+# it runs the GIANTS retail build correctly once installed from the official
+# *_ESD.img installer.
+
 # source in utilities script
 source 'utils.sh'
 
@@ -307,6 +311,18 @@ symlink --src-path '/home/container/home' --dst-path '/home/nobody' --link-type 
 
 # set permissions to allow rw for all users (used when appending util output to supervisor log)
 chmod 666 "/config/supervisord.log"
+
+# If installer files were uploaded to /opt/fs25/installer, run the silent GIANTS
+# installer in the background once X and the Wine prefix are up.
+nohup /usr/local/bin/install_fs25.sh >/dev/null 2>&1 &
+
+# If a GIANTS license key is present (file or GIANTS_LICENSE_KEY env), run the
+# headless activation helper in the background. It waits for the X server and
+# the activation window, then types the key automatically.
+if [ -f "/home/container/.fs25_key" ] || [ -n "${GIANTS_LICENSE_KEY:-}" ]; then
+	echo "[info] Found FS25 license key, starting headless activation helper" | ts '%Y-%m-%d %H:%M:%.S'
+	nohup /usr/local/bin/activate_fs25.sh >/home/container/activation.log 2>&1 &
+fi
 
 echo "[info] Starting Supervisor..." | ts '%Y-%m-%d %H:%M:%.S'
 
