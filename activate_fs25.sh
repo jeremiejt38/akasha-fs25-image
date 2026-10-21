@@ -205,7 +205,7 @@ for attempt in 1 2 3 4; do
 done
 
 if ! activation_started; then
-    log "ERROR: activation did not start (no AVD file)"
+    log "ERROR: activation did not start (no AHC/AHT file at config root)"
     kill "$GAME_PID" 2>/dev/null || true
     pkill -f 'FarmingSimulator2025.*\.exe' 2>/dev/null || true
     exit 1

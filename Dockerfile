@@ -61,10 +61,12 @@ RUN chmod +x /usr/local/bin/install_fs25.sh /usr/local/bin/activate_fs25.sh
 COPY init.sh /usr/bin/init.sh
 RUN chmod +x /usr/bin/init.sh
 
-# Runtime helper scripts reference /home/nobody/.build/fs25 for templates. Because
-# Pelican runs the container with a read-only root filesystem, point them to the
-# writable /tmp/fs25-build copy created by init.sh at runtime.
-RUN sed -i 's|/home/nobody/.build/fs25|/home/container/.fs25-build|g' /usr/local/bin/copy_server_config.sh
+# Replace the upstream copy_server_config.sh: it overwrote the live
+# dedicatedServerConfig.xml with the env-baked template on every boot, which
+# wiped Save Manager / in-game edits. The patched version seeds the file only
+# when it is missing.
+COPY copy_server_config.sh /usr/local/bin/copy_server_config.sh
+RUN chmod +x /usr/local/bin/copy_server_config.sh
 
 # Pelican converts boolean environment variables to 1/0, so accept "1" as true.
 RUN sed -i 's|\[\[ \$AUTOSTART_SERVER = "true" \]\]|[[ $AUTOSTART_SERVER = "true" ]] \|\| [[ $AUTOSTART_SERVER = "1" ]]|g' /usr/local/bin/autostart_fs25.sh
