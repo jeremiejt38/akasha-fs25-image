@@ -159,7 +159,6 @@ async function main() {
   );
 
   console.log('Logged in');
-  console.log('Session cookie:', session_cookie);
 
   const res = await send_request(host, 'GET', {}, session_cookie);
 
@@ -188,7 +187,18 @@ async function main() {
   params['start_server'] = 'Start';
 
   console.log('Starting server');
-  console.log(JSON.stringify(params, null, 2));
+  // Log the submitted fields with secrets masked — never print
+  // admin_password/game_password values to the console.
+  console.log(JSON.stringify(
+    Object.fromEntries(
+      Object.entries(params).map(([k, v]) => [
+        k,
+        /password/i.test(k) ? '•••' : v,
+      ])
+    ),
+    null,
+    2
+  ));
 
   await send_request(host, 'POST', params, session_cookie);
 
