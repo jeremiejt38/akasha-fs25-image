@@ -5,9 +5,11 @@
 #
 #   1. Boot-time update (`--boot`, run synchronously by init.sh BEFORE
 #      supervisord starts the game stack). The game and the GIANTS
-#      auto-updater share an instance mutex, so a GUI update can ONLY run
+#      auto-updater share an instance mutex, so the update can ONLY run
 #      while no FS25 process exists — doing it here, on a private Xvnc
 #      display (:99), is the only window where that is guaranteed.
+#      The update itself is fully headless: the self-updated AU worker is
+#      invoked directly with `-updateAll`, no GUI clicking involved.
 #
 #   2. Periodic check (no args, background): cheap HTTP re-check while the
 #      server is running. It can NEVER update a live server (mutex); it
@@ -100,100 +102,67 @@ activated() {
         && find "$CONFIG_DIR" -maxdepth 1 -name 'AHT_*.dat' | grep -q .
 }
 
-find_launcher_window() {
-    xdotool search --name 'FarmingSimulator2025' 2>/dev/null | head -1
-}
-
-# Click the primary CTA at the bottom right of the 755x377 launcher dialog
-# ("Activate >" on the key form, "Install" on the update screen).
-click_primary_cta() {
-    local win="$1"
-    xdotool windowactivate --sync "$win" 2>/dev/null || true
-    xdotool windowfocus --sync "$win" 2>/dev/null || true
-    sleep 1
-    eval "$(xdotool getwindowgeometry --shell "$win" 2>/dev/null || echo 'X=0;Y=0;WIDTH=755;HEIGHT=377')"
-    xdotool mousemove $((X + WIDTH * 81 / 100)) $((Y + HEIGHT * 93 / 100)) click 1 2>/dev/null || true
-}
-
-kill_launcher() {
+kill_fs25() {
     pkill -f 'FarmingSimulator2025\.exe' 2>/dev/null || true
     pkill -f 'GiantsCrashReporter\.exe' 2>/dev/null || true
 }
 
-# Drives the GIANTS launcher through the update flow.
+# Path to the self-updated GIANTS auto-updater worker. The launcher
+# refreshes its own copy into updater/<activation-hash>/ and then spawns
+# it with `-gamePath … -userProfilePath … -updateAll` — invoking that copy
+# directly is the supported headless update path (no GUI automation).
+au_worker_exe() {
+    find "$CONFIG_DIR/updater" -mindepth 2 -maxdepth 2 -type f \
+        -name 'FarmingSimulator2025.exe' -printf '%T@ %p\n' 2>/dev/null \
+        | sort -rn | head -1 | cut -d' ' -f2-
+}
+
+# Runs the GIANTS AU worker headlessly with `-updateAll`.
 # Returns 0 if an update was applied, 1 on failure.
-run_gui_update() {
-    local before after win i
+run_headless_update() {
+    local before after worker
     before="$(installed_version)"
 
-    # Stamp the updater log so we can detect a fresh update check.
-    local stamp
-    stamp=$(stat -c %s "${CONFIG_DIR}/updater/updater.00.log" 2>/dev/null || echo 0)
+    worker="$(au_worker_exe)"
+    if [ -z "$worker" ]; then
+        # No self-updated worker copy yet — let the launcher run once so
+        # it drops updater/<hash>/FarmingSimulator2025.exe, then retry.
+        log "No self-updated AU worker yet, priming the launcher once"
+        timeout 180 wine "$GAME_EXE" >> "$LOG" 2>&1 || true
+        kill_fs25
+        worker="$(au_worker_exe)"
+        [ -z "$worker" ] && { log "ERROR: AU worker unavailable after priming"; return 1; }
+    fi
 
-    log "Launching GIANTS launcher for update"
-    nohup wine "$GAME_EXE" >> "$LOG" 2>&1 &
-    local lpid=$!
+    log "Running AU worker headless (-updateAll)"
+    wine "$worker" \
+        -gamePath "Z:/opt/fs25/game/Farming Simulator 2025/" \
+        -userProfilePath "C:/users/nobody/Documents/My Games/FarmingSimulator2025/" \
+        -updateAll >> "$LOG" 2>&1 &
+    local wpid=$!
 
-    # Wait for the launcher window AND the updater's own check to finish.
-    win=""
-    for i in $(seq 1 90); do
-        win=$(find_launcher_window)
-        [ -n "$win" ] && break
-        kill -0 "$lpid" 2>/dev/null || { log "ERROR: launcher exited early"; return 1; }
-        sleep 2
-    done
-    [ -z "$win" ] && { log "ERROR: launcher window not found"; kill_launcher; return 1; }
-    log "Launcher window ready (id=$win)"
-
-    # Give the updater time to run its check (fresh lines in updater.00.log
-    # past our stamp) and the window to render its Update Available state.
-    for i in $(seq 1 60); do
-        local cur
-        cur=$(stat -c %s "${CONFIG_DIR}/updater/updater.00.log" 2>/dev/null || echo 0)
-        [ "$cur" != "$stamp" ] && sleep 15 && break
-        sleep 2
-    done
-
-    click_primary_cta "$win"
-    log "Install requested, waiting for update to finish"
-
-    # The launcher self-updates, forks a worker AU (updater/<hash>/
-    # FarmingSimulator2025.exe -updateAll) and exits — $lpid dying is
-    # NORMAL, not a failure. Watch for ANY FarmingSimulator2025.exe:
-    # done = VERSION changed, or no AU process for ~15s (self-exit).
-    # Bounded at ~45 min for ~2GB downloads on slow links.
-    empty=0
-    for i in $(seq 1 540); do
-        after="$(installed_version)"
-        [ -n "$after" ] && [ "$after" != "$before" ] && break
-        if pgrep -f 'FarmingSimulator2025\.exe' >/dev/null 2>&1; then
-            empty=0
-        else
-            empty=$((empty + 1))
-            [ "$empty" -ge 3 ] && break
-        fi
-        # Re-click Install occasionally in case the first click landed too
-        # early on the still-rendering window.
-        if [ $((i % 60)) -eq 0 ]; then
-            win=$(find_launcher_window)
-            [ -n "$win" ] && click_primary_cta "$win"
-        fi
+    # The worker exits on its own once the patch is installed (or when
+    # nothing needs doing). Bound the wait at ~60 min for multi-GB
+    # downloads on slow links.
+    for _ in $(seq 1 720); do
+        kill -0 "$wpid" 2>/dev/null || break
         sleep 5
     done
+    wait "$wpid" 2>/dev/null || true
 
     after="$(installed_version)"
     if [ -n "$after" ] && [ "$after" != "$before" ]; then
-        # Give the AU worker ~60s to flush its registry and exit on its
-        # own — killing it mid-write corrupts the prefix.
+        # Give the worker ~60s to flush its registry and exit on its own —
+        # killing it mid-write corrupts the wine prefix.
         for _ in $(seq 1 12); do
             pgrep -f 'FarmingSimulator2025\.exe' >/dev/null 2>&1 || break
             sleep 5
         done
-        kill_launcher
+        kill_fs25
         log "Update applied: ${before} -> ${after}"
         return 0
     fi
-    kill_launcher
+    kill_fs25
     log "ERROR: update did not complete (VERSION still '${after}')"
     return 1
 }
@@ -251,11 +220,11 @@ if [ "$BOOT_MODE" -eq 1 ]; then
         Xvnc "$DISPLAY" -depth 24 -geometry 1024x768 -SecurityTypes=None -rfbport 5999 >/dev/null 2>&1 &
         BOOT_X_PID=$!
         if wait_x && wait_prefix; then
-            if run_gui_update; then
+            if run_headless_update; then
                 NEW="$(installed_version)"
                 write_state "$NEW" "$LATEST" false "$AUTO_JSON" "updated from $INST"
             else
-                write_state "$INST" "$LATEST" true "$AUTO_JSON" "gui update failed"
+                write_state "$INST" "$LATEST" true "$AUTO_JSON" "update failed"
             fi
         else
             log "ERROR: private X display / wine prefix not ready"
