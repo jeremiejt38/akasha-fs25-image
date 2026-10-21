@@ -54,9 +54,11 @@ async function send_request(host, method, data = {}, session_cookie = '') {
     agent,
   };
   console.log('Request:', method, target);
-  console.log('Headers:', JSON.stringify(options.headers, null, 2));
   if (method === 'POST') {
-    console.log('Body:', body);
+    // Never log headers (Cookie) or the raw body: they carry the admin and
+    // game passwords and would leak into the Pelican console / docker logs.
+    const fieldNames = Object.keys(data).join(',');
+    console.log('Body fields:', fieldNames);
   }
   return new Promise((resolve, reject) => {
     const req = http.request(target, options, (res) => {

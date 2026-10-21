@@ -333,4 +333,10 @@ echo "[info] Starting Supervisor..." | ts '%Y-%m-%d %H:%M:%.S'
 # restore file descriptors to prevent duplicate stdout & stderr to supervisord.log
 exec 1>&3 2>&4
 
+# Stream the FS25 dedicated-server log to the container console so the
+# Pelican console shows live game output, not only init/start-script
+# messages. -F keeps retrying until the game creates the file.
+DEDI_LOG="/home/container/opt/fs25/config/FarmingSimulator2025/dedicated_server/logs/server.log"
+(tail -n +1 -F "$DEDI_LOG" 2>/dev/null | sed 's/^/[fs25] /') &
+
 exec /usr/bin/supervisord -c /etc/supervisord.conf -n
