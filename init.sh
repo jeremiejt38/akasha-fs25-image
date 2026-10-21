@@ -162,7 +162,7 @@ fi
 
 export VNC_PASSWORD=$(echo "${VNC_PASSWORD}" | sed -e 's~^[ \t]*~~;s~[ \t]*$~~')
 if [[ ! -z "${VNC_PASSWORD}" ]]; then
-	echo "[info] VNC_PASSWORD defined as '${VNC_PASSWORD}'" | ts '%Y-%m-%d %H:%M:%.S'
+	echo "[info] VNC_PASSWORD defined (value hidden)" | ts '%Y-%m-%d %H:%M:%.S'
 fi
 
 export HTTPS_CERT_PATH=$(echo "${HTTPS_CERT_PATH}" | sed -e 's~^[ \t]*~~;s~[ \t]*$~~')
