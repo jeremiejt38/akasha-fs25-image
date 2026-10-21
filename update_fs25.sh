@@ -1,21 +1,18 @@
 #!/bin/bash
 # Headless FS25 update manager for the Pelican container.
 #
-# Two jobs, both running in the background:
+# Two jobs:
 #
-#   1. Boot-time update (AUTO_UPDATE != "0"):
-#      checks the latest public patch on farming-simulator.com/updates.php
-#      against the version stored in game/VERSION. If the game is behind,
-#      it drives the GIANTS launcher GUI through Xvnc (xdotool): the
-#      launcher performs its own update check, shows "Update Available",
-#      and the script clicks Install, waits for completion, then asks
-#      supervisor to restart the game stack so the dedicated server comes
-#      back on the new version.
+#   1. Boot-time update (`--boot`, run synchronously by init.sh BEFORE
+#      supervisord starts the game stack). The game and the GIANTS
+#      auto-updater share an instance mutex, so a GUI update can ONLY run
+#      while no FS25 process exists — doing it here, on a private Xvnc
+#      display (:99), is the only window where that is guaranteed.
 #
-#   2. Periodic check (UPDATE_CHECK_INTERVAL, default 6h):
-#      cheap HTTP re-check while the server is running. It NEVER updates a
-#      live server; it only refreshes .server-version.json so the panel
-#      banner can tell the user a restart will apply the update.
+#   2. Periodic check (no args, background): cheap HTTP re-check while the
+#      server is running. It can NEVER update a live server (mutex); it
+#      only refreshes .server-version.json so the panel banner can tell
+#      the user a restart will apply the update.
 #
 # State is reported in /home/container/.server-version.json (server volume
 # root) so a panel plugin can read it via the Wings file API.
@@ -32,6 +29,9 @@ VERSION_FILE="${GAME_DIR}/VERSION"
 CONFIG_DIR="/opt/fs25/config/FarmingSimulator2025"
 WINEPREFIX="/home/container/.fs25server"
 CHECK_INTERVAL="${UPDATE_CHECK_INTERVAL:-21600}"
+
+BOOT_MODE=0
+[ "${1:-}" = "--boot" ] && BOOT_MODE=1
 
 export DISPLAY=:0
 export WINEPREFIX WINEARCH=win64 WINEDEBUG=-all WINEDLLOVERRIDES=mscoree=d USER=nobody
@@ -185,7 +185,7 @@ run_gui_update() {
 
 # --- main ------------------------------------------------------------------
 
-log "Update manager started (AUTO_UPDATE=${AUTO_UPDATE:-unset})"
+log "Update manager started (AUTO_UPDATE=${AUTO_UPDATE:-unset}, boot=$BOOT_MODE)"
 
 # Single instance guard.
 exec 9>"$LOCK"
@@ -194,17 +194,24 @@ if ! flock -n 9; then
     exit 0
 fi
 
-# Wait for the game + activation before doing anything.
-for _ in $(seq 1 360); do
-    [ -f "$DEDI_EXE" ] && [ -f "$VERSION_FILE" ] && break
-    sleep 5
-done
-[ -f "$DEDI_EXE" ] || { log "ERROR: game not installed"; exit 1; }
+if [ "$BOOT_MODE" -eq 1 ]; then
+    # Pre-supervisord run: bail fast when the game is not usable yet — the
+    # install/activation helpers handle first boot after the stack is up.
+    [ -f "$DEDI_EXE" ] && [ -f "$VERSION_FILE" ] || { log "boot: game not installed yet, skipping"; exit 0; }
+    activated || { log "boot: not activated yet, skipping"; exit 0; }
+else
+    # Wait for the game + activation before doing anything.
+    for _ in $(seq 1 360); do
+        [ -f "$DEDI_EXE" ] && [ -f "$VERSION_FILE" ] && break
+        sleep 5
+    done
+    [ -f "$DEDI_EXE" ] || { log "ERROR: game not installed"; exit 1; }
+    for _ in $(seq 1 360); do
+        activated && break
+        sleep 5
+    done
+fi
 
-for _ in $(seq 1 360); do
-    activated && break
-    sleep 5
-done
 ACTIVATED=true
 if ! activated; then
     ACTIVATED=false
@@ -220,22 +227,44 @@ INST="$(installed_version)"
 LATEST="$(latest_version)"
 log "Installed version: ${INST:-unknown}, latest public patch: ${LATEST:-unreachable}"
 
+if [ "$BOOT_MODE" -eq 1 ]; then
+    # The only thing --boot does: apply the pending patch while no FS25
+    # process exists yet, on a private Xvnc display the launcher can
+    # render onto (:99 — supervisord wipes /tmp/.X* for :0 later anyway).
+    if [ -n "$LATEST" ] && version_lt "$INST" "$LATEST" && $AUTO_JSON && $ACTIVATED; then
+        export DISPLAY=:99
+        Xvnc "$DISPLAY" -depth 24 -geometry 1024x768 -SecurityTypes=None -rfbport 5999 >/dev/null 2>&1 &
+        BOOT_X_PID=$!
+        if wait_x && wait_prefix; then
+            if run_gui_update; then
+                NEW="$(installed_version)"
+                write_state "$NEW" "$LATEST" false "$AUTO_JSON" "updated from $INST"
+            else
+                write_state "$INST" "$LATEST" true "$AUTO_JSON" "gui update failed"
+            fi
+        else
+            log "ERROR: private X display / wine prefix not ready"
+            write_state "$INST" "$LATEST" true "$AUTO_JSON" "boot env not ready"
+        fi
+        kill "$BOOT_X_PID" 2>/dev/null || true
+    else
+        if [ -z "$LATEST" ]; then
+            write_state "${INST:-}" "" false "$AUTO_JSON" "latest check unreachable"
+        elif version_lt "$INST" "$LATEST"; then
+            write_state "$INST" "$LATEST" true "$AUTO_JSON" "auto update disabled or not activated"
+        else
+            write_state "$INST" "$LATEST" false "$AUTO_JSON"
+        fi
+    fi
+    exit 0
+fi
+
+# Watcher mode (game running): never attempt a GUI update — the FS25
+# instance mutex makes it impossible. Refresh state only.
 if [ -z "$LATEST" ]; then
     write_state "${INST:-}" "" false "$AUTO_JSON" "latest check unreachable"
-elif version_lt "$INST" "$LATEST" && $AUTO_JSON && $ACTIVATED; then
-    wait_x || { log "ERROR: X server not available"; write_state "$INST" "$LATEST" true "$AUTO_JSON" "no X server"; exit 1; }
-    wait_prefix || { log "ERROR: wine prefix/symlink not ready"; write_state "$INST" "$LATEST" true "$AUTO_JSON" "no prefix"; exit 1; }
-    if run_gui_update; then
-        NEW="$(installed_version)"
-        write_state "$NEW" "$LATEST" false "$AUTO_JSON" "updated from $INST"
-        log "Restarting game stack on new version"
-        supervisorctl -c /etc/supervisord.conf restart start >/dev/null 2>&1 || true
-        INST="$NEW"
-    else
-        write_state "$INST" "$LATEST" true "$AUTO_JSON" "gui update failed"
-    fi
 elif version_lt "$INST" "$LATEST"; then
-    write_state "$INST" "$LATEST" true "$AUTO_JSON" "auto update disabled"
+    write_state "$INST" "$LATEST" true "$AUTO_JSON" "restart to update"
 else
     write_state "$INST" "$LATEST" false "$AUTO_JSON"
 fi

@@ -333,10 +333,15 @@ if [ -f "/home/container/.fs25_key" ] || [ -n "${GIANTS_LICENSE_KEY:-}" ]; then
 	nohup /usr/local/bin/activate_fs25.sh >/home/container/activation.log 2>&1 &
 fi
 
-# Headless update manager: applies the latest GIANTS patch at boot when
-# AUTO_UPDATE is on, and keeps .server-version.json current while running
-# so the panel can warn the user that a restart will update the server.
-echo "[info] Starting FS25 update manager (AUTO_UPDATE=${AUTO_UPDATE:-1})" | ts '%Y-%m-%d %H:%M:%.S'
+# Headless update manager. Two runs:
+#  - --boot (synchronous, BEFORE supervisord starts the game): applies any
+#    pending GIANTS patch. The game and the GIANTS auto-updater share an
+#    instance mutex, so this pre-start window is the only place a GUI
+#    update can succeed — this is what makes "restart to update" real.
+#  - background watcher: refreshes .server-version.json periodically so
+#    the panel banner can warn about outdated versions.
+echo "[info] Checking FS25 updates before game start (AUTO_UPDATE=${AUTO_UPDATE:-1})" | ts '%Y-%m-%d %H:%M:%.S'
+/usr/local/bin/update_fs25.sh --boot || true
 nohup /usr/local/bin/update_fs25.sh >/dev/null 2>&1 &
 
 echo "[info] Starting Supervisor..." | ts '%Y-%m-%d %H:%M:%.S'
