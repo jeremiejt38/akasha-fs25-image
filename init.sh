@@ -328,6 +328,12 @@ if [ -f "/home/container/.fs25_key" ] || [ -n "${GIANTS_LICENSE_KEY:-}" ]; then
 	nohup /usr/local/bin/activate_fs25.sh >/home/container/activation.log 2>&1 &
 fi
 
+# Headless update manager: applies the latest GIANTS patch at boot when
+# AUTO_UPDATE is on, and keeps .server-version.json current while running
+# so the panel can warn the user that a restart will update the server.
+echo "[info] Starting FS25 update manager (AUTO_UPDATE=${AUTO_UPDATE:-1})" | ts '%Y-%m-%d %H:%M:%.S'
+nohup /usr/local/bin/update_fs25.sh >/dev/null 2>&1 &
+
 echo "[info] Starting Supervisor..." | ts '%Y-%m-%d %H:%M:%.S'
 
 # restore file descriptors to prevent duplicate stdout & stderr to supervisord.log
@@ -351,6 +357,13 @@ DEDI_LOG_DIR="/home/container/opt/fs25/config/FarmingSimulator2025/dedicated_ser
 		fi
 		sleep 15
 	done
+) &
+
+# Stream the update manager log to the console as well.
+UPDATE_LOG="/home/container/update.log"
+(
+	touch "$UPDATE_LOG" 2>/dev/null || true
+	tail -n +1 -F "$UPDATE_LOG" 2>/dev/null | sed "s/^/[fs25-update] /"
 ) &
 
 exec /usr/bin/supervisord -c /etc/supervisord.conf -n
