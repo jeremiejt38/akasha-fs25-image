@@ -3,8 +3,17 @@
 # exit script if return code != 0
 set -e
 
+# Scrub credentials leaked by older script versions from the shared
+# supervisor log (login form bodies used to be echoed unmasked) — done
+# before the tee redirect so the log fd stays valid.
+sed -i -E 's/(password|admin_password|game_password|pass|passphrase)=[^& "]+/\1=REDACTED/g' /config/supervisord.log 2>/dev/null || true
+
 # redirect new file descriptors and then tee stdout & stderr to supervisor log and console (captures output from this script)
 exec 3>&1 4>&2 &> >(tee -a /config/supervisord.log)
+
+# The system Wine (10.x staging, shipped by the upstream image) is used as-is:
+# it runs the GIANTS retail build correctly once installed from the official
+# *_ESD.img installer.
 
 # source in utilities script
 source 'utils.sh'
@@ -158,7 +167,7 @@ fi
 
 export VNC_PASSWORD=$(echo "${VNC_PASSWORD}" | sed -e 's~^[ \t]*~~;s~[ \t]*$~~')
 if [[ ! -z "${VNC_PASSWORD}" ]]; then
-	echo "[info] VNC_PASSWORD defined as '${VNC_PASSWORD}'" | ts '%Y-%m-%d %H:%M:%.S'
+	echo "[info] VNC_PASSWORD defined (value hidden)" | ts '%Y-%m-%d %H:%M:%.S'
 fi
 
 export HTTPS_CERT_PATH=$(echo "${HTTPS_CERT_PATH}" | sed -e 's~^[ \t]*~~;s~[ \t]*$~~')
@@ -302,15 +311,120 @@ fi
 
 # call symlink function from utils.sh
 # Use the resolved path because /config is itself a symlink to /home/container.
+# On a fresh volume the target does not exist yet: utils.sh would see
+# /home/nobody as a broken link and try to rm it, which fails on Pelican's
+# read-only rootfs. Create the target first.
+mkdir -p /home/container/home
 symlink --src-path '/home/container/home' --dst-path '/home/nobody' --link-type 'softlink'
 
 
 # set permissions to allow rw for all users (used when appending util output to supervisor log)
 chmod 666 "/config/supervisord.log"
 
+# If installer files were uploaded to /opt/fs25/installer, run the silent GIANTS
+# installer in the background once X and the Wine prefix are up.
+nohup /usr/local/bin/install_fs25.sh >/dev/null 2>&1 &
+
+# If a GIANTS license key is present (file or GIANTS_LICENSE_KEY env), run the
+# headless activation helper in the background. It waits for the X server and
+# the activation window, then types the key automatically.
+if [ -f "/home/container/.fs25_key" ] || [ -n "${GIANTS_LICENSE_KEY:-}" ]; then
+	echo "[info] Found FS25 license key, starting headless activation helper" | ts '%Y-%m-%d %H:%M:%.S'
+	nohup /usr/local/bin/activate_fs25.sh >/home/container/activation.log 2>&1 &
+fi
+
+# Headless update manager: applies the latest GIANTS patch at boot when
+# AUTO_UPDATE is on, and keeps .server-version.json current while running
+# so the panel can warn the user that a restart will update the server.
+echo "[info] Starting FS25 update manager (AUTO_UPDATE=${AUTO_UPDATE:-1})" | ts '%Y-%m-%d %H:%M:%.S'
+nohup /usr/local/bin/update_fs25.sh >/dev/null 2>&1 &
+
 echo "[info] Starting Supervisor..." | ts '%Y-%m-%d %H:%M:%.S'
 
 # restore file descriptors to prevent duplicate stdout & stderr to supervisord.log
 exec 1>&3 2>&4
+
+# Stream the FS25 dedicated-server log to the container console so the
+# Pelican console shows live game output, not only init/start-script
+# messages. The game writes a NEW timestamped file per session — follow
+# whichever logs/server_*.log is newest, and retarget on restart.
+DEDI_LOG_DIR="/home/container/opt/fs25/config/FarmingSimulator2025/dedicated_server/logs"
+(
+	cur=""
+	tail_pid=""
+	while :; do
+		newest="$(ls -t "$DEDI_LOG_DIR"/server_*.log 2>/dev/null | head -1)"
+		if [ -n "$newest" ] && [ "$newest" != "$cur" ]; then
+			[ -n "$tail_pid" ] && kill "$tail_pid" 2>/dev/null
+			cur="$newest"
+			tail -n +1 -F "$cur" 2>/dev/null | sed "s/^/[fs25] /" &
+			tail_pid=$!
+		fi
+		sleep 15
+	done
+) &
+
+# Stream the GAME log as well — this is what the GIANTS web UI "Log" view
+# shows (mission loading, savegame settings, mod loading, gameplay events).
+# Two sources: <profile>/logs/log_*.txt (dedi-side game log, written at dedi
+# start) and <profile>/log_*.txt (mission log, written when a game starts).
+# Both are timestamped and rotate — follow whichever is newest.
+GAME_LOG_DIR="/home/container/opt/fs25/config/FarmingSimulator2025"
+(
+	cur=""
+	tail_pid=""
+	while :; do
+		newest="$(ls -t "$GAME_LOG_DIR"/logs/log_*.txt "$GAME_LOG_DIR"/log_*.txt 2>/dev/null | head -1)"
+		if [ -n "$newest" ] && [ "$newest" != "$cur" ]; then
+			[ -n "$tail_pid" ] && kill "$tail_pid" 2>/dev/null
+			cur="$newest"
+			tail -n +1 -F "$cur" 2>/dev/null | sed "s/^/[fs25-game] /" &
+			tail_pid=$!
+		fi
+		sleep 15
+	done
+) &
+
+# Stream the update manager log to the console as well.
+UPDATE_LOG="/home/container/update.log"
+(
+	touch "$UPDATE_LOG" 2>/dev/null || true
+	tail -n +1 -F "$UPDATE_LOG" 2>/dev/null | sed "s/^/[fs25-update] /"
+) &
+
+# --- Credential hygiene ---------------------------------------------------
+# The base image auto-opens the dedi web UI in Firefox with the admin
+# password in the URL (?password=...) for VNC autologin — which persists the
+# credential in Firefox history (places.sqlite) and session-restore files.
+# Disable history/session recording via user.js and wipe the stored files.
+(
+	while :; do
+		for prof in /home/container/.mozilla/firefox/*.default*/; do
+			[ -d "$prof" ] || continue
+			cat > "$prof/user.js" <<'EOF'
+user_pref("places.history.enabled", false);
+user_pref("browser.sessionstore.privacy_level", 2);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("browser.sessionstore.max_tabs_undo", 0);
+user_pref("browser.formfill.enable", false);
+EOF
+			rm -f "$prof/places.sqlite"* "$prof/favicons.sqlite" "$prof/formhistory.sqlite" 2>/dev/null
+			rm -rf "$prof/sessionstore-backups" 2>/dev/null
+		done
+		sleep 300
+	done
+) &
+
+
+# Expose the FS25 web admin interface on the port Pelican allocated for it
+# (WEB_PORT). The wineserver only binds the container IP:7999, so a Docker
+# port map to any other internal port (e.g. 7997->7997) lands on a dead
+# listener. socat bridges the gap; 7999 needs no forward since the
+# webserver already answers on that port directly.
+if [ -n "${WEB_PORT:-}" ] && [ "${WEB_PORT}" != "7999" ]; then
+	echo "[info] Forwarding web admin port ${WEB_PORT} -> 127.0.0.1:7999" | ts '%Y-%m-%d %H:%M:%.S'
+	nohup socat tcp-listen:"${WEB_PORT}",reuseaddr,fork,bind=0.0.0.0 tcp:127.0.0.1:7999 >/dev/null 2>&1 &
+fi
+
 
 exec /usr/bin/supervisord -c /etc/supervisord.conf -n
