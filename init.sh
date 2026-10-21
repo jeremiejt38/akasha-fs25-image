@@ -306,6 +306,10 @@ fi
 
 # call symlink function from utils.sh
 # Use the resolved path because /config is itself a symlink to /home/container.
+# On a fresh volume the target does not exist yet: utils.sh would see
+# /home/nobody as a broken link and try to rm it, which fails on Pelican's
+# read-only rootfs. Create the target first.
+mkdir -p /home/container/home
 symlink --src-path '/home/container/home' --dst-path '/home/nobody' --link-type 'softlink'
 
 
