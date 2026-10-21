@@ -416,5 +416,15 @@ EOF
 ) &
 
 
+# Expose the FS25 web admin interface on the port Pelican allocated for it
+# (WEB_PORT). The wineserver only binds the container IP:7999, so a Docker
+# port map to any other internal port (e.g. 7997->7997) lands on a dead
+# listener. socat bridges the gap; 7999 needs no forward since the
+# webserver already answers on that port directly.
+if [ -n "${WEB_PORT:-}" ] && [ "${WEB_PORT}" != "7999" ]; then
+	echo "[info] Forwarding web admin port ${WEB_PORT} -> 127.0.0.1:7999" | ts '%Y-%m-%d %H:%M:%.S'
+	nohup socat tcp-listen:"${WEB_PORT}",reuseaddr,fork,bind=0.0.0.0 tcp:127.0.0.1:7999 >/dev/null 2>&1 &
+fi
+
 
 exec /usr/bin/supervisord -c /etc/supervisord.conf -n
