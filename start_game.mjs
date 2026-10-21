@@ -120,28 +120,32 @@ async function login(host, username, password) {
   return session_cookie_result[1];
 }
 
-const expected_start_params = [
-  'game_name',
-  'admin_password',
-  'game_password',
-  'savegame',
-  'server_port',
-  'max_player',
-  'mp_language',
-  'auto_save_interval',
-  'stats_interval',
-  'pause_game_if_empty',
-];
-
-function get_regex(text, regex) {
-  const reg = new RegExp(regex, 'igsu');
-  const results = {};
-  let match;
-  while ((match = reg.exec(text)) !== null) {
-    if (!expected_start_params.includes(match[1])) continue;
-    results[match[1]] = match[2];
+// The dedi start form must be re-posted in full: map_start and the career
+// fields (initialMoney, initialLoan, economicDifficulty...) are required on a
+// fresh savegame, and omitting them makes the dedi silently ignore Start.
+function parse_form_fields(form_html) {
+  const params = {};
+  for (const m of form_html.matchAll(
+    /<select[^>]*name\s*=\s*"?([^"\s>]+)"?[^>]*>([\s\S]*?)<\/select>/gi
+  )) {
+    const sel =
+      m[2].match(/<option value="([^"]*)"[^>]*selected/i) ||
+      m[2].match(/<option value="([^"]*)"/i);
+    if (sel) params[m[1]] = sel[1];
   }
-  return results;
+  for (const m of form_html.matchAll(/<input([^>]*?)>/gi)) {
+    const attrs = m[1];
+    const type = (attrs.match(/type="([^"]*)"/i) || [])[1] || 'text';
+    const name = (attrs.match(/name\s*=\s*"?([^"\s>]+)"?/i) || [])[1];
+    const value = (attrs.match(/value="([^"]*)"/i) || [])[1] || '';
+    if (!name || type === 'submit') continue;
+    if (type === 'checkbox') {
+      if (/checked/i.test(attrs)) params[name] = value || 'on';
+      continue;
+    }
+    params[name] = value;
+  }
+  return params;
 }
 
 let main_interval = null;
@@ -164,24 +168,13 @@ async function main() {
 
   const html = await res.text();
 
-  const unsorted_params = {
-    // First-option fallback for selects without an explicit selected marker;
-    // the selected= regex below overrides these when present.
-    ...get_regex(
-      html,
-      '<select name\\s*=\\s*"([^"]*)".*?<option value="([^"]*)"'
-    ),
-    ...get_regex(html, '<input type="[^"]*" name="([^"]*)" value="([^"]*)"'),
-    ...get_regex(
-      html,
-      '<select name\\s*=\\s*"([^"]*)".*?<option value="([^"]*)" selected'
-    ),
-  };
-
-  const params = {};
-  for (const key of expected_start_params) {
-    assert(typeof unsorted_params[key] !== 'undefined', 'Missing key: ' + key);
-    params[key] = unsorted_params[key];
+  const form_match = html.match(
+    /<form[^>]*name\s*=\s*"configuration"[\s\S]*?<\/form>/i
+  );
+  assert(form_match !== null, 'configuration form not found');
+  const params = parse_form_fields(form_match[0]);
+  for (const key of ['game_name', 'admin_password', 'game_password']) {
+    assert(typeof params[key] !== 'undefined', 'Missing key: ' + key);
   }
   params['game_name'] = '+%2B+' + params['game_name'];
   params['start_server'] = 'Start';
