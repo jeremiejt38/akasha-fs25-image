@@ -335,8 +335,22 @@ exec 1>&3 2>&4
 
 # Stream the FS25 dedicated-server log to the container console so the
 # Pelican console shows live game output, not only init/start-script
-# messages. -F keeps retrying until the game creates the file.
-DEDI_LOG="/home/container/opt/fs25/config/FarmingSimulator2025/dedicated_server/logs/server.log"
-(tail -n +1 -F "$DEDI_LOG" 2>/dev/null | sed 's/^/[fs25] /') &
+# messages. The game writes a NEW timestamped file per session — follow
+# whichever logs/server_*.log is newest, and retarget on restart.
+DEDI_LOG_DIR="/home/container/opt/fs25/config/FarmingSimulator2025/dedicated_server/logs"
+(
+	cur=""
+	tail_pid=""
+	while :; do
+		newest="$(ls -t "$DEDI_LOG_DIR"/server_*.log 2>/dev/null | head -1)"
+		if [ -n "$newest" ] && [ "$newest" != "$cur" ]; then
+			[ -n "$tail_pid" ] && kill "$tail_pid" 2>/dev/null
+			cur="$newest"
+			tail -n +1 -F "$cur" 2>/dev/null | sed "s/^/[fs25] /" &
+			tail_pid=$!
+		fi
+		sleep 15
+	done
+) &
 
 exec /usr/bin/supervisord -c /etc/supervisord.conf -n
