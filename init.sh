@@ -359,6 +359,27 @@ DEDI_LOG_DIR="/home/container/opt/fs25/config/FarmingSimulator2025/dedicated_ser
 	done
 ) &
 
+# Stream the GAME log as well — this is what the GIANTS web UI "Log" view
+# shows (mission loading, savegame settings, mod loading, gameplay events).
+# Two sources: <profile>/logs/log_*.txt (dedi-side game log, written at dedi
+# start) and <profile>/log_*.txt (mission log, written when a game starts).
+# Both are timestamped and rotate — follow whichever is newest.
+GAME_LOG_DIR="/home/container/opt/fs25/config/FarmingSimulator2025"
+(
+	cur=""
+	tail_pid=""
+	while :; do
+		newest="$(ls -t "$GAME_LOG_DIR"/logs/log_*.txt "$GAME_LOG_DIR"/log_*.txt 2>/dev/null | head -1)"
+		if [ -n "$newest" ] && [ "$newest" != "$cur" ]; then
+			[ -n "$tail_pid" ] && kill "$tail_pid" 2>/dev/null
+			cur="$newest"
+			tail -n +1 -F "$cur" 2>/dev/null | sed "s/^/[fs25-game] /" &
+			tail_pid=$!
+		fi
+		sleep 15
+	done
+) &
+
 # Stream the update manager log to the console as well.
 UPDATE_LOG="/home/container/update.log"
 (
