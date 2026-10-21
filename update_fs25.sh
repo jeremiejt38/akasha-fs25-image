@@ -157,28 +157,43 @@ run_gui_update() {
     click_primary_cta "$win"
     log "Install requested, waiting for update to finish"
 
-    # Wait until VERSION changes (success) or bounded timeout (~45 min for
-    # ~2GB downloads on slow links).
+    # The launcher self-updates, forks a worker AU (updater/<hash>/
+    # FarmingSimulator2025.exe -updateAll) and exits — $lpid dying is
+    # NORMAL, not a failure. Watch for ANY FarmingSimulator2025.exe:
+    # done = VERSION changed, or no AU process for ~15s (self-exit).
+    # Bounded at ~45 min for ~2GB downloads on slow links.
+    empty=0
     for i in $(seq 1 540); do
         after="$(installed_version)"
         [ -n "$after" ] && [ "$after" != "$before" ] && break
+        if pgrep -f 'FarmingSimulator2025\.exe' >/dev/null 2>&1; then
+            empty=0
+        else
+            empty=$((empty + 1))
+            [ "$empty" -ge 3 ] && break
+        fi
         # Re-click Install occasionally in case the first click landed too
         # early on the still-rendering window.
         if [ $((i % 60)) -eq 0 ]; then
             win=$(find_launcher_window)
             [ -n "$win" ] && click_primary_cta "$win"
         fi
-        kill -0 "$lpid" 2>/dev/null || break
         sleep 5
     done
 
     after="$(installed_version)"
-    kill_launcher
-
     if [ -n "$after" ] && [ "$after" != "$before" ]; then
+        # Give the AU worker ~60s to flush its registry and exit on its
+        # own — killing it mid-write corrupts the prefix.
+        for _ in $(seq 1 12); do
+            pgrep -f 'FarmingSimulator2025\.exe' >/dev/null 2>&1 || break
+            sleep 5
+        done
+        kill_launcher
         log "Update applied: ${before} -> ${after}"
         return 0
     fi
+    kill_launcher
     log "ERROR: update did not complete (VERSION still '${after}')"
     return 1
 }
