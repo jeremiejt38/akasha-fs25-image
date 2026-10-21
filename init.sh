@@ -3,6 +3,11 @@
 # exit script if return code != 0
 set -e
 
+# Scrub credentials leaked by older script versions from the shared
+# supervisor log (login form bodies used to be echoed unmasked) — done
+# before the tee redirect so the log fd stays valid.
+sed -i -E 's/(password|admin_password|game_password|pass|passphrase)=[^& "]+/\1=REDACTED/g' /config/supervisord.log 2>/dev/null || true
+
 # redirect new file descriptors and then tee stdout & stderr to supervisor log and console (captures output from this script)
 exec 3>&1 4>&2 &> >(tee -a /config/supervisord.log)
 
@@ -386,5 +391,30 @@ UPDATE_LOG="/home/container/update.log"
 	touch "$UPDATE_LOG" 2>/dev/null || true
 	tail -n +1 -F "$UPDATE_LOG" 2>/dev/null | sed "s/^/[fs25-update] /"
 ) &
+
+# --- Credential hygiene ---------------------------------------------------
+# The base image auto-opens the dedi web UI in Firefox with the admin
+# password in the URL (?password=...) for VNC autologin — which persists the
+# credential in Firefox history (places.sqlite) and session-restore files.
+# Disable history/session recording via user.js and wipe the stored files.
+(
+	while :; do
+		for prof in /home/container/.mozilla/firefox/*.default*/; do
+			[ -d "$prof" ] || continue
+			cat > "$prof/user.js" <<'EOF'
+user_pref("places.history.enabled", false);
+user_pref("browser.sessionstore.privacy_level", 2);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("browser.sessionstore.max_tabs_undo", 0);
+user_pref("browser.formfill.enable", false);
+EOF
+			rm -f "$prof/places.sqlite"* "$prof/favicons.sqlite" "$prof/formhistory.sqlite" 2>/dev/null
+			rm -rf "$prof/sessionstore-backups" 2>/dev/null
+		done
+		sleep 300
+	done
+) &
+
+
 
 exec /usr/bin/supervisord -c /etc/supervisord.conf -n
