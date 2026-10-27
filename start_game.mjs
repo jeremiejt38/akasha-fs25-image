@@ -1,5 +1,6 @@
 import http from 'http';
 import assert from 'assert';
+import fs from 'fs';
 
 async function send_request(host, method, data = {}, session_cookie = '') {
   let path = '/index.html?lang=en';
@@ -148,6 +149,98 @@ function parse_form_fields(form_html) {
   return params;
 }
 
+// Mods installed through the panel Mod Store only land in the dedi's mod
+// pool — the save still has to be told to load them. The store records the
+// zip filenames in .mod-store.json (meta.pending_activation / pending_deactivation);
+// every start consumes both lists through the same modactivate_*/moddeactivate_*
+// checkboxes the web UI shows while the mission is stopped, then writes back
+// whatever the dedi refused so a mod queued with missing dependencies still
+// activates on its own once the dependencies land.
+const MODSTORE_STATE = '/home/container/.mod-store.json';
+
+function write_modstore_state(state) {
+  try {
+    fs.writeFileSync(MODSTORE_STATE, JSON.stringify(state));
+  } catch (e) {
+    console.error('Could not write .mod-store.json:', e.message);
+  }
+}
+
+function checkbox_names(html, prefix) {
+  const names = new Set();
+  for (const m of html.matchAll(
+    new RegExp('<input[^>]*name\\s*=\\s*"?(' + prefix + '[^"\\s>]+)"?[^>]*>', 'gi')
+  )) {
+    names.add(m[1]);
+  }
+  return names;
+}
+
+async function apply_pending_mod_changes(host, session_cookie, page_html) {
+  let state;
+  try {
+    state = JSON.parse(fs.readFileSync(MODSTORE_STATE, 'utf8'));
+  } catch {
+    return page_html;
+  }
+  const meta = state.meta || {};
+  const activate = (meta.pending_activation || []).map(String);
+  const deactivate = (meta.pending_deactivation || []).map(String);
+  if (activate.length === 0 && deactivate.length === 0) return page_html;
+
+  const act_boxes = checkbox_names(page_html, 'modactivate_');
+  const deact_boxes = checkbox_names(page_html, 'moddeactivate_');
+
+  const base = () => {
+    const fm = page_html.match(
+      /<form[^>]*name\s*=\s*"configuration"[\s\S]*?<\/form>/i
+    );
+    return fm ? parse_form_fields(fm[0]) : {};
+  };
+
+  const submit = async (names, button) => {
+    const params = base();
+    for (const n of names) params[n] = 'on';
+    params[button] = '1';
+    console.log(`Submitting ${button} for:`, names.join(', '));
+    await send_request(host, 'POST', params, session_cookie);
+  };
+
+  const to_deactivate = deactivate
+    .map((f) => 'moddeactivate_' + f)
+    .filter((n) => deact_boxes.has(n));
+  const to_activate = activate
+    .map((f) => 'modactivate_' + f)
+    .filter((n) => act_boxes.has(n));
+
+  if (to_deactivate.length === 0 && to_activate.length === 0) {
+    // Stale entries only (file gone or already in the wanted state).
+    meta.pending_activation = [];
+    meta.pending_deactivation = [];
+    write_modstore_state(state);
+    return page_html;
+  }
+
+  await submit(to_deactivate, 'deactivate_mods');
+  await submit(to_activate, 'activate_mods');
+
+  // Re-fetch: whatever the dedi refused keeps an unchecked box and stays queued.
+  const res = await send_request(host, 'GET', {}, session_cookie);
+  const html = await res.text();
+  const left_act = checkbox_names(html, 'modactivate_');
+  const left_deact = checkbox_names(html, 'moddeactivate_');
+  meta.pending_activation = activate.filter((f) => left_act.has('modactivate_' + f));
+  meta.pending_deactivation = deactivate.filter((f) => left_deact.has('moddeactivate_' + f));
+  if (meta.pending_activation.length > 0) {
+    console.log(
+      'Mods still pending activation (dedi refused — missing dependencies?):',
+      meta.pending_activation.join(', ')
+    );
+  }
+  write_modstore_state(state);
+  return html;
+}
+
 let main_interval = null;
 
 async function main() {
@@ -166,7 +259,7 @@ async function main() {
 
   const res = await send_request(host, 'GET', {}, session_cookie);
 
-  const html = await res.text();
+  const html = await apply_pending_mod_changes(host, session_cookie, await res.text());
 
   const form_match = html.match(
     /<form[^>]*name\s*=\s*"configuration"[\s\S]*?<\/form>/i
