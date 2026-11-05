@@ -25,6 +25,13 @@ if [ -d "$CONFIG_DIR" ]; then
   else
     echo -e "${GREEN}dedicatedServerConfig.xml exists, preserving persistent config${NOCOLOR}"
   fi
+
+# The game port is Pelican infrastructure (allocation / relay range), not a
+# player setting: always sync it from SERVER_PORT, whatever the persistent
+# XML says — otherwise a re-allocation leaves the game bound to a dead port.
+if [ -f "$DEST" ] && [ -n "${SERVER_PORT:-}" ]; then
+  sed -i "s|<port>[0-9]\{1,5\}</port>|<port>${SERVER_PORT}</port>|" "$DEST"
+fi
 else
   echo -e "${RED}ERROR: Game didn't start for first time, no directories?${NOCOLOR}" && exit
 fi
