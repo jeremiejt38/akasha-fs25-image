@@ -8,8 +8,10 @@
 #      auto-updater share an instance mutex, so the update can ONLY run
 #      while no FS25 process exists — doing it here, on a private Xvnc
 #      display (:99), is the only window where that is guaranteed.
-#      The update itself is fully headless: the self-updated AU worker is
-#      invoked directly with `-updateAll`, no GUI clicking involved.
+#      Preferred path: the self-updated AU worker invoked with
+#      `-updateAll` (fully headless). Fallback: the launcher run on :99
+#      with an xdotool-confirmed update dialog — required to refresh the
+#      AU's stale branch cache and to self-update the worker itself.
 #
 #   2. Periodic check (no args, background): cheap HTTP re-check while the
 #      server is running. It can NEVER update a live server (mutex); it
@@ -117,33 +119,51 @@ au_worker_exe() {
         | sort -rn | head -1 | cut -d' ' -f2-
 }
 
-# Runs the GIANTS AU worker headlessly with `-updateAll`.
-# Returns 0 if an update was applied, 1 on failure.
-run_headless_update() {
-    local before after worker
-    before="$(installed_version)"
+# The AU reuses its cached branch/product metadata (branch.xml,
+# branch_*.dat, signature.dat under updater/<hash>/) whenever the branch
+# id is unchanged, so a stale cache makes it believe an old install is
+# current for weeks. Deleting the cache forces a fresh metadata fetch on
+# the next launcher run. The worker alone does NOT fetch metadata — the
+# launcher must run once after invalidation.
+invalidate_au_cache() {
+    find "$CONFIG_DIR/updater" -mindepth 2 -maxdepth 2 -type f \
+        \( -name 'branch.xml' -o -name 'branch_*.dat' -o -name 'signature.dat' \) \
+        -delete 2>/dev/null || true
+}
 
-    worker="$(au_worker_exe)"
-    if [ -z "$worker" ]; then
-        # No self-updated worker copy yet — let the launcher run once so
-        # it drops updater/<hash>/FarmingSimulator2025.exe, then retry.
-        log "No self-updated AU worker yet, priming the launcher once"
-        timeout 180 wine "$GAME_EXE" >> "$LOG" 2>&1 || true
-        kill_fs25
-        worker="$(au_worker_exe)"
-        [ -z "$worker" ] && { log "ERROR: AU worker unavailable after priming"; return 1; }
-    fi
+# The launcher gates every real patch behind a GUI "proceed with update?"
+# dialog — even on the private Xvnc display. Poll for its window and press
+# Return; confirming makes the launcher fetch metadata, self-update and
+# apply the patch itself. Bounded to ~4 min: the window only appears once
+# fresh metadata confirmed an update exists.
+confirm_update_dialog() {
+    for _ in $(seq 1 120); do
+        if xdotool search --name 'FarmingSimulator2025' >/dev/null 2>&1; then
+            xdotool search --name 'FarmingSimulator2025' \
+                windowactivate --sync key Return 2>/dev/null || true
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+# Invokes the self-updated AU worker with `-updateAll` and waits for the
+# VERSION file to change. Returns 0 if an update was applied, 1 otherwise.
+# The worker exits on its own once the patch is installed (or when its
+# cached metadata says nothing needs doing — a stale cache is a silent
+# no-op, which is why the launcher path below exists as a fallback).
+run_worker_update() {
+    local before="$1" worker="$2" after wpid
 
     log "Running AU worker headless (-updateAll)"
     wine "$worker" \
         -gamePath "Z:/opt/fs25/game/Farming Simulator 2025/" \
         -userProfilePath "C:/users/nobody/Documents/My Games/FarmingSimulator2025/" \
         -updateAll >> "$LOG" 2>&1 &
-    local wpid=$!
+    wpid=$!
 
-    # The worker exits on its own once the patch is installed (or when
-    # nothing needs doing). Bound the wait at ~60 min for multi-GB
-    # downloads on slow links.
+    # Bound the wait at ~60 min for multi-GB downloads on slow links.
     for _ in $(seq 1 720); do
         kill -0 "$wpid" 2>/dev/null || break
         sleep 5
@@ -159,11 +179,81 @@ run_headless_update() {
             sleep 5
         done
         kill_fs25
-        log "Update applied: ${before} -> ${after}"
         return 0
     fi
+    return 1
+}
+
+# Runs the launcher interactively on the current display, confirms the
+# "proceed with update?" dialog via xdotool, and waits for the install.
+# This is the only path that refreshes the AU metadata: the launcher
+# re-fetches the product/branch list whenever its cache is missing.
+# Returns 0 if an update was applied, 1 on failure.
+run_launcher_update() {
+    local before="$1" after ppid i
+
+    invalidate_au_cache
+    log "Priming the launcher (GUI confirm via xdotool)"
+
+    # The launcher occasionally exits within seconds on a cold private
+    # display — retry the prime once before giving up.
+    for i in 1 2; do
+        timeout "${AU_PRIME_TIMEOUT:-2400}" wine "$GAME_EXE" >> "$LOG" 2>&1 &
+        ppid=$!
+        if confirm_update_dialog; then
+            break
+        fi
+        kill -0 "$ppid" 2>/dev/null && kill "$ppid" 2>/dev/null
+        wait "$ppid" 2>/dev/null || true
+        [ "$i" -eq 1 ] && { log "Update dialog never appeared, retrying once"; sleep 15; }
+    done
+
+    if ! xdotool search --name 'FarmingSimulator2025' >/dev/null 2>&1 \
+        && ! pgrep -f 'FarmingSimulator2025\.exe' >/dev/null 2>&1; then
+        log "ERROR: launcher never showed the update dialog"
+        return 1
+    fi
+
+    # Poll until VERSION changes (patch applied) or every FS25 process
+    # exits. VERSION is deleted mid-install, so treat a missing file as
+    # "still working". Bounded at ~40 min.
+    for _ in $(seq 1 480); do
+        after="$(installed_version)"
+        [ -n "$after" ] && [ "$after" != "$before" ] && break
+        pgrep -f 'FarmingSimulator2025\.exe' >/dev/null 2>&1 || break
+        sleep 5
+    done
+    # Give the worker ~60s to flush its registry and exit on its own —
+    # killing it mid-write corrupts the wine prefix.
+    for _ in $(seq 1 12); do
+        pgrep -f 'FarmingSimulator2025\.exe' >/dev/null 2>&1 || break
+        sleep 5
+    done
     kill_fs25
-    log "ERROR: update did not complete (VERSION still '${after}')"
+    after="$(installed_version)"
+    [ -n "$after" ] && [ "$after" != "$before" ]
+}
+
+# Applies a pending patch. Preferred path: the self-updated AU worker with
+# `-updateAll` (fully headless). Fallback: the launcher GUI flow, which is
+# required to refresh stale AU metadata and to self-update the worker.
+# Returns 0 if an update was applied, 1 on failure.
+run_headless_update() {
+    local before after worker
+    before="$(installed_version)"
+
+    worker="$(au_worker_exe)"
+    if [ -n "$worker" ] && run_worker_update "$before" "$worker"; then
+        log "Update applied: ${before} -> $(installed_version)"
+        return 0
+    fi
+    [ -n "$worker" ] && log "Worker found nothing to install, trying the launcher path"
+
+    if run_launcher_update "$before"; then
+        log "Update applied: ${before} -> $(installed_version)"
+        return 0
+    fi
+    log "ERROR: update did not complete (VERSION still '$(installed_version)')"
     return 1
 }
 
