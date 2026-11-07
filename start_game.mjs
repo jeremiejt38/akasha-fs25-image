@@ -43,18 +43,19 @@ async function send_request(host, method, data = {}, session_cookie = '') {
     body += key + '=' + data[key];
   }
   if (method === 'POST') {
-    headers['Content-Length'] = body.length;
+    headers['Content-Length'] = Buffer.byteLength(body);
   }
   if (method === 'GET' && Object.keys(data).length > 0) {
     path += '&' + body;
   }
+  const url = origin + path;
   const agent = new http.Agent({keepAlive: false});
   const options = {
     method,
     headers,
     agent,
   };
-  console.log('Request:', method, target);
+  console.log('Request:', method, url);
   if (method === 'POST') {
     // Never log headers (Cookie) or the raw body: they carry the admin and
     // game passwords and would leak into the Pelican console / docker logs.
@@ -62,10 +63,17 @@ async function send_request(host, method, data = {}, session_cookie = '') {
     console.log('Body fields:', fieldNames);
   }
   return new Promise((resolve, reject) => {
-    const req = http.request(target, options, (res) => {
-      assert(typeof res.statusCode === 'number');
+    const req = http.request(url, options, (res) => {
       console.log('Response:', res.statusCode);
-      assert(res.statusCode >= 200 && res.statusCode < 400);
+      if (typeof res.statusCode !== 'number' || res.statusCode < 200 || res.statusCode >= 400) {
+        // Reject through the promise instead of asserting inside the
+        // callback: a thrown assert kills the wrapper process for good
+        // (supervisord autorestart=false), while a rejection just fails
+        // this main() pass and the next interval retries.
+        res.resume();
+        reject(new Error('HTTP ' + res.statusCode + ' on ' + method + ' ' + path));
+        return;
+      }
       res['text'] = async () => {
         return new Promise((resolve_text) => {
           let data = '';
@@ -117,7 +125,11 @@ async function login(host, username, password) {
     const m = /(SessionID=[^;]+)/i.exec(cookie);
     if (m !== null) return m[1];
   }
-  assert(session_cookie_result !== null, 'No SessionID cookie from server');
+  if (session_cookie_result === null) {
+    // Not fatal: the next interval pass retries. A thrown error inside this
+    // async function only rejects this pass — it does not crash the wrapper.
+    throw new Error('No SessionID cookie on GET or login POST (dedi web UI not ready?)');
+  }
   return session_cookie_result[1];
 }
 
@@ -242,8 +254,22 @@ async function apply_pending_mod_changes(host, session_cookie, page_html) {
 }
 
 let main_interval = null;
+let main_in_flight = false;
 
 async function main() {
+  if (main_in_flight) {
+    // A slow dedi response must not pile up overlapping start requests.
+    return;
+  }
+  main_in_flight = true;
+  try {
+    await run_once();
+  } finally {
+    main_in_flight = false;
+  }
+}
+
+async function run_once() {
   const host = process.env.WEBSERVER_LISTENING_ON + ':7999';
 
   console.log('Starting game');
